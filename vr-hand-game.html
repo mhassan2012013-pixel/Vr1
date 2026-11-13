@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>فقاعات VR</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0f1a;color:#eaf2ff;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;overflow:hidden;touch-action:none}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #ui{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;background:#0b0f1aee;z-index:5}
+  #ui[hidden]{display:none}
+  #ui h1{margin:0;font-size:28px}
+  #ui p{margin:0;max-width:34em;line-height:1.7;color:#b8c7e6}
+  #go{font:inherit;font-size:20px;padding:14px 36px;border:0;border-radius:14px;background:#3ddcff;color:#04202a;font-weight:700}
+  #msg{min-height:1.4em;color:#ffd166}
+  video{position:fixed;width:2px;height:2px;opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>فقاعات VR</h1>
+  <p>١) لف الموبايل أفقي. ٢) اضغط ابدأ واسمح للكاميرا والحساسات. ٣) ركّبه في الـ VR Box. ٤) حرّك إيدك قدام الكاميرا الخلفية وفرقع الفقاعات بأصابعك. لف راسك عشان تدوّر على فقاعات حواليك.</p>
+  <button id="go">ابدأ</button>
+  <div id="msg"></div>
+</div>
+<video id="cam" playsinline muted></video>
+<canvas id="c"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+(function(){
+  const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  const video = document.getElementById('cam');
+  const ui = document.getElementById('ui'), msg = document.getElementById('msg');
+  let W = 0, H = 0;
+  function resize(){ W = cv.width = innerWidth; H = cv.height = innerHeight; }
+  addEventListener('resize', resize); resize();
+
+  // ----- state -----
+  let running = false, yaw = 0, gotOrientation = false;
+  let hands = [];            // smoothed landmark arrays in video-normalized coords
+  let lastHandTime = 0;
+  let score = 0;
+  const bubbles = [], parts = [];
+  const TIPS = [4, 8, 12, 16, 20, 9];
+  const LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+  const wrap = a => ((a % 360) + 540) % 360 - 180;
+
+  function onOrient(e){
+    if (e.alpha == null) return;
+    gotOrientation = true;
+    yaw = e.alpha;
+  }
+
+  // ----- hand tracking -----
+  let tracker;
+  function setupTracker(){
+    tracker = new Hands({ locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/' + f });
+    tracker.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    tracker.onResults(r => {
+      const found = r.multiHandLandmarks || [];
+      if (found.length) lastHandTime = performance.now();
+      hands = found.map((lm, i) => {
+        const prev = hands[i];
+        return lm.map((p, k) => prev ? { x: prev[k].x + (p.x - prev[k].x) * 0.6, y: prev[k].y + (p.y - prev[k].y) * 0.6 } : { x: p.x, y: p.y });
+      });
+    });
+  }
+  async function detectLoop(){
+    if (!running) return;
+    if (video.readyState >= 2) { try { await tracker.send({ image: video }); } catch(e){} }
+    requestAnimationFrame(detectLoop);
+  }
+
+  // ----- game -----
+  function spawn(){
+    const r = 34 + Math.random() * 20;
+    bubbles.push({ yaw: yaw + (Math.random() * 90 - 45), y: H + r, r, vy: 40 + Math.random() * 35, hue: Math.floor(Math.random() * 360), wob: Math.random() * 6 });
+  }
+  function pop(b, x, y){
+    score++;
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * 6.283, s = 60 + Math.random() * 140;
+      parts.push({ yaw: b.yaw, y, dx: Math.cos(a) * s, dy: Math.sin(a) * s, life: 0.6, hue: b.hue });
+    }
+  }
+  let spawnT = 0, last = performance.now();
+
+  function toEye(lm, vw, vh, Wh){
+    const sc = Math.max(Wh / vw, H / vh);
+    const ox = (Wh - vw * sc) / 2, oy = (H - vh * sc) / 2;
+    return { x: ox + lm.x * vw * sc, y: oy + lm.y * vh * sc };
+  }
+
+  function update(dt){
+    spawnT -= dt;
+    if (spawnT <= 0 && bubbles.length < 8) { spawn(); spawnT = 0.8; }
+    const Wh = W / 2, ppd = Wh / 70;
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    const pts = [];
+    hands.forEach(h => TIPS.forEach(i => pts.push(toEye(h[i], vw, vh, Wh))));
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i];
+      b.y -= b.vy * dt; b.wob += dt;
+      const bx = Wh / 2 + wrap(yaw - b.yaw) * ppd + Math.sin(b.wob * 2) * 6;
+      let hit = false;
+      for (const p of pts) if (Math.hypot(p.x - bx, p.y - b.y) < b.r + 8) { hit = true; break; }
+      if (hit) { pop(b, bx, b.y); bubbles.splice(i, 1); }
+      else if (b.y < -b.r) bubbles.splice(i, 1);
+    }
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i]; p.life -= dt; p.y += p.dy * dt; p.dxs = (p.dxs || 0) + p.dx * dt / ppd;
+      if (p.life <= 0) parts.splice(i, 1);
+    }
+  }
+
+  function drawEye(x0, s){
+    const Wh = W / 2, ppd = Wh / 70;
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0, 0, Wh, H); ctx.clip();
+    ctx.translate(x0, 0);
+    // camera
+    const sc = Math.max(Wh / vw, H / vh);
+    if (video.readyState >= 2) ctx.drawImage(video, (Wh - vw * sc) / 2, (H - vh * sc) / 2, vw * sc, vh * sc);
+    // bubbles
+    const bd = -s * 5;
+    for (const b of bubbles) {
+      const x = Wh / 2 + wrap(yaw - b.yaw) * ppd + Math.sin(b.wob * 2) * 6 + bd;
+      if (x < -b.r || x > Wh + b.r) continue;
+      const g = ctx.createRadialGradient(x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.1, x, b.y, b.r);
+      g.addColorStop(0, 'hsla(' + b.hue + ',90%,85%,0.85)');
+      g.addColorStop(1, 'hsla(' + b.hue + ',90%,55%,0.35)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, b.y, b.r, 0, 6.283); ctx.fill();
+      ctx.strokeStyle = 'hsla(' + b.hue + ',100%,90%,0.9)'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    for (const p of parts) {
+      const x = Wh / 2 + wrap(yaw - p.yaw) * ppd + (p.dxs || 0) + bd;
+      ctx.fillStyle = 'hsla(' + p.hue + ',100%,75%,' + Math.max(0, p.life / 0.6) + ')';
+      ctx.beginPath(); ctx.arc(x, p.y, 4, 0, 6.283); ctx.fill();
+    }
+    // virtual hand
+    const hd = -s * 9;
+    for (const h of hands) {
+      const P = h.map(l => { const q = toEye(l, vw, vh, Wh); return { x: q.x + hd, y: q.y }; });
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(61,220,255,0.95)'; ctx.lineWidth = 9;
+      ctx.shadowColor = '#3ddcff'; ctx.shadowBlur = 14;
+      ctx.beginPath(); for (const [a, b] of LINKS) { ctx.moveTo(P[a].x, P[a].y); ctx.lineTo(P[b].x, P[b].y); } ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#fff';
+      for (const i of TIPS.slice(0, 5)) { ctx.beginPath(); ctx.arc(P[i].x, P[i].y, 8, 0, 6.283); ctx.fill(); }
+    }
+    // HUD
+    ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
+    ctx.font = '700 ' + Math.round(H * 0.07) + 'px system-ui,sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('★ ' + score, Wh / 2 + bd * 0.5, H * 0.1);
+    if (performance.now() - lastHandTime > 2500) {
+      ctx.direction = 'rtl'; ctx.font = '600 ' + Math.round(H * 0.045) + 'px system-ui,sans-serif';
+      ctx.fillText('حرّك إيدك قدام الكاميرا', Wh / 2, H * 0.92);
+    }
+    ctx.restore();
+  }
+
+  function frame(now){
+    if (!running) return;
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    drawEye(0, -1); drawEye(W / 2, 1);
+    ctx.fillStyle = '#000'; ctx.fillRect(W / 2 - 1, 0, 2, H);
+    requestAnimationFrame(frame);
+  }
+
+  // ----- start -----
+  document.getElementById('go').addEventListener('click', async () => {
+    msg.textContent = 'جاري التحميل…';
+    try {
+      if (typeof Hands === 'undefined') throw new Error('مكتبة تتبع اليد ما اتحملتش. تأكد من الإنترنت.');
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try { await DeviceOrientationEvent.requestPermission(); } catch(e){}
+      }
+      addEventListener('deviceorientation', onOrient, true);
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      video.srcObject = stream; await video.play();
+      try { await document.documentElement.requestFullscreen(); } catch(e){}
+      try { await screen.orientation.lock('landscape'); } catch(e){}
+      try { await navigator.wakeLock.request('screen'); } catch(e){}
+      setupTracker();
+      ui.hidden = true; running = true; last = performance.now();
+      detectLoop(); requestAnimationFrame(frame);
+    } catch (e) {
+      msg.textContent = 'مشكلة: ' + (e && e.message ? e.message : e) + ' (الكاميرا محتاجة رابط https)';
+    }
+  });
+})();
+</script>
+</body>
+</html>
